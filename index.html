@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#111">
+<title>Table Translator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #111; color: #f4f4f4; font-family: -apple-system, system-ui, "PingFang SC", "Noto Sans SC", sans-serif; overflow: hidden; }
+  #setup { position: fixed; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 14px; padding: 24px; max-width: 520px; margin: 0 auto; }
+  #setup h1 { font-size: 26px; }
+  #setup p { color: #aaa; font-size: 14px; line-height: 1.45; }
+  #setup input { font-size: 16px; padding: 14px; border-radius: 10px; border: 1px solid #444; background: #1c1c1c; color: #fff; width: 100%; }
+  button { font: inherit; border: 0; border-radius: 10px; cursor: pointer; }
+  .primary { font-size: 18px; padding: 16px; background: #2f7cf6; color: #fff; font-weight: 600; }
+  #app { position: fixed; inset: 0; display: none; flex-direction: column; height: 100dvh; }
+  .half { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; padding: 14px 16px; }
+  #top { transform: rotate(180deg); background: #16202e; }
+  #bottom { background: #1b1b1b; }
+  .head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #8fa3bf; letter-spacing: .03em; padding-bottom: 6px; border-bottom: 1px solid #ffffff14; }
+  .log { flex: 1; overflow-y: auto; padding-top: 8px; display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth; }
+  .log .spacer { flex: 1; }
+  .turn .who { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .turn .text { font-size: 24px; line-height: 1.3; }
+  .turn.live .text { font-size: 28px; }
+  .turn.echo .text { font-size: 16px; color: #8a8a8a; }
+  .turn.echo .who { opacity: .6; }
+  .s1 .who { color: #6fb3ff; }
+  .s2 .who { color: #ffb36f; }
+  .s0 .who { color: #999; }
+  .hint { color: #777; font-size: 18px; }
+  #bar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #000; border-top: 1px solid #333; border-bottom: 1px solid #333; }
+  #bar button { padding: 10px 12px; background: #2a2a2a; color: #fff; font-size: 14px; }
+  #bar button.on { background: #b3261e; }
+  #status { flex: 1; font-size: 12px; color: #aaa; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #666; margin-right: 6px; vertical-align: middle; }
+  .dot.ok { background: #2ecc71; } .dot.warn { background: #f1c40f; } .dot.err { background: #e74c3c; }
+  #meter { width: 46px; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
+  #meter i { display: block; height: 100%; width: 0; background: #2ecc71; transition: width 80ms; }
+</style>
+</head>
+<body>
+
+<div id="setup">
+  <h1>Table Translator</h1>
+  <p>English ⇄ 中文, live. Put the phone flat on the table: the far half shows Chinese for the person across from you, the near half shows English for you.</p>
+  <p>Paste an OpenAI API key. It is saved only on this phone and sent only to api.openai.com. Cost is about $4/hour while running (two translation streams at $0.034/min).</p>
+  <input id="key" type="password" placeholder="sk-..." autocomplete="off" autocapitalize="off" spellcheck="false">
+  <button class="primary" id="start">Start translating</button>
+  <p id="setupErr" style="color:#ff7b7b"></p>
+</div>
+
+<div id="app">
+  <section class="half" id="top">
+    <div class="head"><span>中文翻译</span><span>说话人 1 = 英语 · 说话人 2 = 中文</span></div>
+    <div class="log" id="logZh"><div class="spacer"></div><div class="hint">请开始说话…</div></div>
+  </section>
+  <div id="bar">
+    <button id="pause">Pause</button>
+    <div id="meter"><i></i></div>
+    <div id="status"><span class="dot"></span>Starting…</div>
+    <button id="clear">Clear</button>
+    <button id="stop">Stop</button>
+  </div>
+  <section class="half" id="bottom">
+    <div class="head"><span>English</span><span>Speaker 1 = English · Speaker 2 = 中文</span></div>
+    <div class="log" id="logEn"><div class="spacer"></div><div class="hint">Start talking…</div></div>
+  </section>
+</div>
+
+<script>
+const API = "https://api.openai.com/v1/realtime/translations";
+const GAP_MS = 1400; // silence that closes a turn
+const $ = (id) => document.getElementById(id);
+
+const isCJK = (s) => {
+  const cjk = (s.match(/[㐀-鿿豈-﫿]/g) || []).length;
+  const lat = (s.match(/[A-Za-z]/g) || []).length;
+  if (!cjk && !lat) return null;
+  return cjk * 2 >= lat; // a CJK char carries roughly a word
+};
+
+let micStream = null, paused = false, running = false, wakeLock = null;
+const sessions = {};
+
+function setStatus(text, kind) {
+  $("status").innerHTML = `<span class="dot ${kind || ""}"></span>${text}`;
+}
+
+function statusFromSessions() {
+  if (!running) return;
+  const states = Object.values(sessions).map((s) => s.state);
+  if (paused) return setStatus("Paused – not listening", "warn");
+  if (states.every((s) => s === "live")) setStatus("Listening · 正在聆听", "ok");
+  else if (states.some((s) => s === "error")) setStatus(Object.values(sessions).find((s) => s.err)?.err || "Error", "err");
+  else setStatus("Connecting…", "warn");
+}
+
+// One translation session per target language, both fed by the same mic.
+class Lane {
+  constructor(lang, logEl, labels) {
+    this.lang = lang; this.log = logEl; this.labels = labels;
+    this.state = "idle"; this.turn = null; this.lastAt = 0; this.retries = 0;
+  }
+
+  async mintSecret(key) {
+    const variants = [
+      { input: { transcription: { model: "gpt-realtime-whisper" }, noise_reduction: { type: "far_field" } } },
+      { input: { transcription: { model: "gpt-realtime-whisper" } } },
+      {},
+    ];
+    let lastErr = "";
+    for (const v of variants) {
+      const r = await fetch(`${API}/client_secrets`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ session: { model: "gpt-realtime-translate", audio: { ...v, output: { language: this.lang } } } }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok) return body.value || body.client_secret?.value;
+      lastErr = body.error?.message || `HTTP ${r.status}`;
+      if (r.status === 401 || r.status === 403 || r.status === 429) break;
+    }
+    throw new Error(lastErr);
+  }
+
+  async connect(key) {
+    this.state = "connecting"; this.err = null; statusFromSessions();
+    try {
+      const secret = await this.mintSecret(key);
+      const pc = new RTCPeerConnection();
+      this.pc = pc;
+      pc.addTrack(micStream.getAudioTracks()[0], micStream);
+      pc.ontrack = () => {}; // translated speech is not played: it would loop back into the mic
+      const dc = pc.createDataChannel("oai-events");
+      dc.onopen = () => { this.state = "live"; this.retries = 0; statusFromSessions(); };
+      dc.onmessage = (e) => this.onEvent(JSON.parse(e.data));
+      dc.onclose = () => this.dropped("channel closed");
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "failed" || pc.connectionState === "closed") this.dropped(pc.connectionState);
+      };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      const r = await fetch(`${API}/calls`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/sdp" },
+        body: offer.sdp,
+      });
+      if (!r.ok) throw new Error(await r.text());
+      await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+    } catch (e) {
+      this.fail(e.message || String(e));
+    }
+  }
+
+  fail(msg) {
+    this.state = "error"; this.err = `${this.lang}: ${msg}`.slice(0, 160);
+    statusFromSessions();
+    this.retryLater();
+  }
+
+  dropped(why) {
+    if (this.pc?._closing || !running) return;
+    if (this.pc) this.pc._closing = true;
+    try { this.pc?.close(); } catch {}
+    this.state = "error"; this.err = `${this.lang}: reconnecting (${why})`;
+    statusFromSessions();
+    this.retryLater();
+  }
+
+  retryLater() {
+    if (!running || this.retryTimer) return;
+    const delay = Math.min(1000 * 2 ** this.retries++, 15000);
+    this.retryTimer = setTimeout(() => { this.retryTimer = null; if (running) this.connect(localStorage.getItem("oaiKey")); }, delay);
+  }
+
+  close() {
+    clearTimeout(this.retryTimer); this.retryTimer = null;
+    if (this.pc) { this.pc._closing = true; try { this.pc.close(); } catch {} }
+    this.state = "idle";
+  }
+
+  onEvent(ev) {
+    if (ev.type === "error") { this.err = `${this.lang}: ${ev.error?.message || "error"}`; setStatus(this.err, "err"); return; }
+    if (ev.type === "session.output_transcript.delta") this.append("out", ev.delta);
+    else if (ev.type === "session.input_transcript.delta") this.append("in", ev.delta);
+  }
+
+  append(kind, delta) {
+    if (!delta) return;
+    const now = performance.now();
+    if (!this.turn || now - this.lastAt > GAP_MS) this.newTurn();
+    this.lastAt = now;
+    this.turn[kind] += delta;
+    this.render(this.turn);
+    clearTimeout(this.idle);
+    this.idle = setTimeout(() => { if (this.turn) { this.turn.el.classList.remove("live"); this.turn = null; } }, GAP_MS);
+  }
+
+  newTurn() {
+    if (this.turn) this.turn.el.classList.remove("live");
+    this.log.querySelector(".hint")?.remove();
+    const el = document.createElement("div");
+    el.className = "turn live s0";
+    el.innerHTML = `<div class="who"></div><div class="text"></div>`;
+    this.log.appendChild(el);
+    this.turn = { el, in: "", out: "" };
+  }
+
+  render(t) {
+    const srcZh = isCJK(t.in);
+    const speaker = srcZh === null ? 0 : srcZh ? 2 : 1;
+    // Same language in and out means the speaker already reads this half: show it quietly.
+    const echo = srcZh !== null && srcZh === (this.lang === "zh");
+    t.el.className = `turn s${speaker}${echo ? " echo" : ""}${t === this.turn ? " live" : ""}`;
+    t.el.querySelector(".who").textContent = this.labels[speaker];
+    t.el.querySelector(".text").textContent = t.out || (echo ? t.in : "…");
+    const near = this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 160;
+    if (near) this.log.scrollTop = this.log.scrollHeight;
+  }
+}
+
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+}
+document.addEventListener("visibilitychange", () => { if (running && document.visibilityState === "visible") keepAwake(); });
+
+function startMeter() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const an = ctx.createAnalyser(); an.fftSize = 512;
+    ctx.createMediaStreamSource(micStream).connect(an);
+    const buf = new Uint8Array(an.fftSize);
+    const tick = () => {
+      if (!running) return ctx.close();
+      an.getByteTimeDomainData(buf);
+      let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+      $("meter").firstChild.style.width = `${paused ? 0 : Math.min(100, peak * 1.6)}%`;
+      requestAnimationFrame(tick);
+    };
+    tick();
+  } catch {}
+}
+
+async function start() {
+  const key = $("key").value.trim();
+  if (!key) { $("setupErr").textContent = "Paste an API key first."; return; }
+  localStorage.setItem("oaiKey", key);
+  $("setupErr").textContent = "";
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) {
+    $("setupErr").textContent = "Microphone permission is needed: " + e.message;
+    return;
+  }
+  $("setup").style.display = "none";
+  $("app").style.display = "flex";
+  running = true; paused = false;
+  keepAwake(); startMeter();
+  sessions.zh = new Lane("zh", $("logZh"), ["", "说话人 1", "说话人 2"]);
+  sessions.en = new Lane("en", $("logEn"), ["", "Speaker 1", "Speaker 2"]);
+  sessions.zh.connect(key);
+  sessions.en.connect(key);
+}
+
+function stop() {
+  running = false;
+  Object.values(sessions).forEach((s) => s.close());
+  micStream?.getTracks().forEach((t) => t.stop());
+  wakeLock?.release?.().catch(() => {});
+  $("app").style.display = "none";
+  $("setup").style.display = "flex";
+}
+
+$("key").value = localStorage.getItem("oaiKey") || "";
+$("start").onclick = start;
+$("stop").onclick = stop;
+$("pause").onclick = () => {
+  paused = !paused;
+  micStream.getAudioTracks().forEach((t) => (t.enabled = !paused));
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("pause").classList.toggle("on", paused);
+  statusFromSessions();
+};
+$("clear").onclick = () => {
+  for (const [id, hint] of [["logZh", "请开始说话…"], ["logEn", "Start talking…"]])
+    $(id).innerHTML = `<div class="spacer"></div><div class="hint">${hint}</div>`;
+  Object.values(sessions).forEach((s) => (s.turn = null));
+};
+
+// ?demo renders fake events so the layout can be checked without a key.
+if (new URLSearchParams(location.search).has("demo")) {
+  $("setup").style.display = "none"; $("app").style.display = "flex"; running = true;
+  sessions.zh = new Lane("zh", $("logZh"), ["", "说话人 1", "说话人 2"]);
+  sessions.en = new Lane("en", $("logEn"), ["", "Speaker 1", "Speaker 2"]);
+  const feed = (lane, inT, outT) => { lane.newTurn(); lane.turn.in = inT; lane.turn.out = outT; lane.render(lane.turn); lane.turn.el.classList.remove("live"); lane.turn = null; };
+  feed(sessions.zh, "It's so nice to finally meet you.", "终于见到您了，真高兴。");
+  feed(sessions.en, "It's so nice to finally meet you.", "It's so nice to finally meet you.");
+  feed(sessions.zh, "你好，欢迎欢迎，请坐。", "你好，欢迎欢迎，请坐。");
+  feed(sessions.en, "你好，欢迎欢迎，请坐。", "Hello, welcome, welcome, please sit down.");
+  sessions.zh.newTurn(); sessions.zh.turn.in = "Thank you for having me"; sessions.zh.turn.out = "谢谢您邀请我"; sessions.zh.render(sessions.zh.turn);
+  setStatus("Listening · 正在聆听", "ok");
+}
+</script>
+</body>
+</html>
