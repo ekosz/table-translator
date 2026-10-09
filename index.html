@@ -54,7 +54,7 @@
 
 <div id="app">
   <section class="half" id="top">
-    <div class="head"><span>中文翻译</span><span>说话人 1 = 英语 · 说话人 2 = 中文</span></div>
+    <div class="head"><span>中文翻译</span></div>
     <div class="log" id="logZh"><div class="spacer"></div><div class="hint">请开始说话…</div></div>
   </section>
   <div id="bar">
@@ -65,7 +65,7 @@
     <button id="stop">Stop</button>
   </div>
   <section class="half" id="bottom">
-    <div class="head"><span>English</span><span>Speaker 1 = English · Speaker 2 = 中文</span></div>
+    <div class="head"><span>English</span></div>
     <div class="log" id="logEn"><div class="spacer"></div><div class="hint">Start talking…</div></div>
   </section>
 </div>
@@ -261,8 +261,8 @@ async function start() {
   $("app").style.display = "flex";
   running = true; paused = false;
   keepAwake(); startMeter();
-  sessions.zh = new Lane("zh", $("logZh"), ["", "说话人 1", "说话人 2"]);
-  sessions.en = new Lane("en", $("logEn"), ["", "Speaker 1", "Speaker 2"]);
+  sessions.zh = new Lane("zh", $("logZh"), ["", "说英语的人", "说中文的人"]);
+  sessions.en = new Lane("en", $("logEn"), ["", "English speaker", "Mandarin speaker"]);
   sessions.zh.connect(key);
   sessions.en.connect(key);
 }
@@ -295,8 +295,8 @@ $("clear").onclick = () => {
 // ?demo renders fake events so the layout can be checked without a key.
 if (new URLSearchParams(location.search).has("demo")) {
   $("setup").style.display = "none"; $("app").style.display = "flex"; running = true;
-  sessions.zh = new Lane("zh", $("logZh"), ["", "说话人 1", "说话人 2"]);
-  sessions.en = new Lane("en", $("logEn"), ["", "Speaker 1", "Speaker 2"]);
+  sessions.zh = new Lane("zh", $("logZh"), ["", "说英语的人", "说中文的人"]);
+  sessions.en = new Lane("en", $("logEn"), ["", "English speaker", "Mandarin speaker"]);
   const feed = (lane, inT, outT) => { lane.newTurn(); lane.turn.in = inT; lane.turn.out = outT; lane.render(lane.turn); lane.turn.el.classList.remove("live"); lane.turn = null; };
   feed(sessions.zh, "It's so nice to finally meet you.", "终于见到您了，真高兴。");
   feed(sessions.en, "It's so nice to finally meet you.", "It's so nice to finally meet you.");
