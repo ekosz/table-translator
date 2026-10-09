@@ -60,6 +60,7 @@
   <div id="bar">
     <button id="pause">Pause</button>
     <div id="meter"><i></i></div>
+    <span id="awake" title="Screen stay-awake">💤</span>
     <div id="status"><span class="dot"></span>Starting…</div>
     <button id="clear">Clear</button>
     <button id="stop">Stop</button>
@@ -223,7 +224,13 @@ class Lane {
 }
 
 async function keepAwake() {
-  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  if (!running || document.visibilityState !== "visible" || (wakeLock && !wakeLock.released)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    $("awake").textContent = "☀️";
+    // The system can drop the lock (low battery, tab switch); take it back while still running.
+    wakeLock.addEventListener("release", () => { $("awake").textContent = "💤"; setTimeout(keepAwake, 1000); });
+  } catch { $("awake").textContent = "💤"; }
 }
 document.addEventListener("visibilitychange", () => { if (running && document.visibilityState === "visible") keepAwake(); });
 
@@ -271,7 +278,7 @@ function stop() {
   running = false;
   Object.values(sessions).forEach((s) => s.close());
   micStream?.getTracks().forEach((t) => t.stop());
-  wakeLock?.release?.().catch(() => {});
+  wakeLock?.release?.().catch(() => {}); wakeLock = null;
   $("app").style.display = "none";
   $("setup").style.display = "flex";
 }
